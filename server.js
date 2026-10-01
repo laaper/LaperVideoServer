@@ -66,7 +66,7 @@ app.post("/subscribe", (req, res) => {
 });
 
 /* Test notification endpoint */
-app.post("/send-test-notification", async (req, res) => {
+app.get("/send-test-notification", async (req, res) => {
   const payload = JSON.stringify({
     title: "Laper 🔔",
     body: "Your Laper notifications are working!",
