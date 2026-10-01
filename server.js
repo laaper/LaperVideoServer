@@ -28,7 +28,7 @@ console.log(`Laper server starting on port ${PORT}`);
 
 /* ---------------- PUSH NOTIFICATIONS ---------------- */
 
-app.get("/", (req, res) => {
+app.get("/send-test-notification", async (req, res) => {
   res.send("Laper server is running");
 });
 
@@ -40,25 +40,25 @@ app.get("/vapidPublicKey", (req, res) => {
 
 app.post("/subscribe", (req, res) => {
   try {
-    const { subscription } = req.body;
+    const { userId, subscription } = req.body;
 
-    if (!subscription || !subscription.endpoint) {
+    if (!userId || !subscription || !subscription.endpoint) {
       return res.status(400).json({
-        error: "Invalid push subscription"
+        error: "userId and subscription are required"
       });
     }
 
-    const id = subscription.endpoint;
+    pushSubscriptions.set(String(userId), subscription);
 
-    pushSubscriptions.set(id, subscription);
-
-    console.log("Push subscription saved.");
+    console.log("Push subscription saved for:", userId);
 
     res.status(201).json({
       success: true
     });
+
   } catch (error) {
     console.error("Subscribe error:", error);
+
     res.status(500).json({
       error: "Could not save subscription"
     });
@@ -140,6 +140,34 @@ server.on("connection", (ws) => {
 
   ws.on("error", (error) => {
     console.error("WebSocket error:", error.message);
+  });
+});
+app.post("/call-response", (req, res) => {
+  const {
+    action,
+    callerId,
+    roomId
+  } = req.body || {};
+
+  console.log(
+    "Call response:",
+    action,
+    callerId,
+    roomId
+  );
+
+  const caller = clients.get(String(callerId));
+
+  if (caller && caller.readyState === WebSocket.OPEN) {
+    caller.send(JSON.stringify({
+      type: "call-response",
+      action,
+      roomId
+    }));
+  }
+
+  res.json({
+    success: true
   });
 });
 
