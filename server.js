@@ -1005,19 +1005,11 @@ app.post(
 
   }
 );
-
-/*
-=========================================================
-SERVER START
-=========================================================
-*/
-// ============================================================
-// LAPER LIVE REELS — MULTI-CATEGORY
-// No database • No video storage • YouTube API discovery
-// ============================================================
+// ===============================
+// LAPER LIVE REELS
+// ===============================
 
 const LAPER_REEL_TOPICS = [
-  "funny",
   "gaming",
   "sports",
   "technology",
@@ -1036,7 +1028,8 @@ const LAPER_REEL_TOPICS = [
   "animation",
   "DIY",
   "history",
-  "fitness"
+  "fitness",
+  "funny"
 ];
 
 app.get("/laper/reels", async (req, res) => {
@@ -1044,14 +1037,16 @@ app.get("/laper/reels", async (req, res) => {
     const apiKey = process.env.YOUTUBE_API_KEY;
 
     if (!apiKey) {
+      console.error("YOUTUBE_API_KEY is missing");
+
       return res.status(500).json({
         ok: false,
-        error: "YOUTUBE_API_KEY is missing",
+        error: "YOUTUBE_API_KEY is not configured",
         reels: []
       });
     }
 
-    let topic = String(req.query.topic || "").trim().toLowerCase();
+    let topic = String(req.query.topic || "").trim();
 
     if (!LAPER_REEL_TOPICS.includes(topic)) {
       topic =
@@ -1060,80 +1055,121 @@ app.get("/laper/reels", async (req, res) => {
         ];
     }
 
-    const url = new URL(
+    const youtubeURL = new URL(
       "https://www.googleapis.com/youtube/v3/search"
     );
 
-    url.searchParams.set("part", "snippet");
-    url.searchParams.set("q", topic);
-    url.searchParams.set("type", "video");
-    url.searchParams.set("videoDuration", "short");
-    url.searchParams.set("videoEmbeddable", "true");
-    url.searchParams.set("maxResults", "10");
-    url.searchParams.set("order", "relevance");
-    url.searchParams.set("key", apiKey);
+    youtubeURL.searchParams.set("part", "snippet");
+    youtubeURL.searchParams.set("q", topic);
+    youtubeURL.searchParams.set("type", "video");
+    youtubeURL.searchParams.set("videoDuration", "short");
+    youtubeURL.searchParams.set("videoEmbeddable", "true");
+    youtubeURL.searchParams.set("maxResults", "8");
+    youtubeURL.searchParams.set("order", "relevance");
+    youtubeURL.searchParams.set("key", apiKey);
 
-    const response = await fetch(url);
+    console.log("Searching YouTube for:", topic);
+
+    const response = await fetch(youtubeURL.toString());
+
+    const rawText = await response.text();
 
     if (!response.ok) {
-      const errorText = await response.text();
-
       console.error(
-        "YouTube API error:",
+        "YouTube API ERROR:",
         response.status,
-        errorText
+        rawText
       );
 
       return res.status(502).json({
         ok: false,
         error: "YouTube search failed",
+        youtubeStatus: response.status,
+        youtubeResponse: rawText,
         reels: []
       });
     }
 
-    const data = await response.json();
+    let data;
+
+    try {
+      data = JSON.parse(rawText);
+    } catch (e) {
+      console.error("YouTube returned invalid JSON:", rawText);
+
+      return res.status(502).json({
+        ok: false,
+        error: "Invalid YouTube response",
+        reels: []
+      });
+    }
 
     const reels = (data.items || [])
-      .filter(item => item.id?.videoId)
+      .filter(item =>
+        item &&
+        item.id &&
+        item.id.videoId
+      )
       .map(item => {
         const videoId = item.id.videoId;
 
         return {
           id: videoId,
-          title: item.snippet?.title || "Laper Reel",
-          channel: item.snippet?.channelTitle || "Creator",
-          description: item.snippet?.description || "",
+
+          title:
+            item.snippet?.title ||
+            "Laper Reel",
+
+          channel:
+            item.snippet?.channelTitle ||
+            "YouTube creator",
+
+          description:
+            item.snippet?.description ||
+            "",
+
           thumbnail:
             item.snippet?.thumbnails?.high?.url ||
             item.snippet?.thumbnails?.medium?.url ||
             item.snippet?.thumbnails?.default?.url ||
             "",
+
           embedUrl:
             "https://www.youtube.com/embed/" +
             encodeURIComponent(videoId) +
             "?autoplay=1&playsinline=1&rel=0",
-          source: "YouTube",
-          topic
+
+          source: "youtube",
+
+          topic: topic
         };
       });
 
-    res.json({
+    console.log(
+      "YouTube returned",
+      reels.length,
+      "Reels for",
+      topic
+    );
+
+    return res.json({
       ok: true,
-      topic,
+      topic: topic,
       count: reels.length,
-      reels
+      reels: reels
     });
 
   } catch (error) {
-    console.error("Laper live Reels error:", error);
+    console.error("Laper Reels server error:", error);
 
-    res.status(500).json({
+    return res.status(500).json({
       ok: false,
-      error: "Internal server error",
+      error: error.message || "Internal server error",
       reels: []
     });
   }
 });
+
 
 app.get("/laper/reels/topics", (req, res) => {
   res.json({
@@ -1142,7 +1178,13 @@ app.get("/laper/reels/topics", (req, res) => {
   });
 });
 
-console.log("Laper Live Reels discovery enabled");
+
+console.log("Laper Live Reels system loaded");
+/*
+=========================================================
+SERVER START
+=========================================================
+*/
 
 httpServer.listen(
   PORT,
