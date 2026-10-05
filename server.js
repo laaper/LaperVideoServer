@@ -1005,9 +1005,9 @@ app.post(
 
   }
 );
-// ===============================
-// LAPER LIVE REELS
-// ===============================
+// ==========================================
+// LAPER MIXED LIVE REELS
+// ==========================================
 
 const LAPER_REEL_TOPICS = [
   "gaming",
@@ -1032,13 +1032,22 @@ const LAPER_REEL_TOPICS = [
   "funny"
 ];
 
+function shuffleLaperReels(array) {
+  const result = [...array];
+
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+
+  return result;
+}
+
 app.get("/laper/reels", async (req, res) => {
   try {
     const apiKey = process.env.YOUTUBE_API_KEY;
 
     if (!apiKey) {
-      console.error("YOUTUBE_API_KEY is missing");
-
       return res.status(500).json({
         ok: false,
         error: "YOUTUBE_API_KEY is not configured",
@@ -1046,121 +1055,141 @@ app.get("/laper/reels", async (req, res) => {
       });
     }
 
-    let topic = String(req.query.topic || "").trim();
+    /*
+      Search several different categories in ONE request.
+      This prevents the feed from being only one topic.
+    */
+    const topics = shuffleLaperReels(LAPER_REEL_TOPICS).slice(0, 6);
 
-    if (!LAPER_REEL_TOPICS.includes(topic)) {
-      topic =
-        LAPER_REEL_TOPICS[
-          Math.floor(Math.random() * LAPER_REEL_TOPICS.length)
-        ];
-    }
+    const searches = topics.map(async (topic) => {
+      try {
+        const youtubeURL = new URL(
+          "https://www.googleapis.com/youtube/v3/search"
+        );
 
-    const youtubeURL = new URL(
-      "https://www.googleapis.com/youtube/v3/search"
-    );
+        youtubeURL.searchParams.set("part", "snippet");
+        youtubeURL.searchParams.set("q", topic);
+        youtubeURL.searchParams.set("type", "video");
+        youtubeURL.searchParams.set("videoDuration", "short");
+        youtubeURL.searchParams.set("videoEmbeddable", "true");
+        youtubeURL.searchParams.set("maxResults", "3");
+        youtubeURL.searchParams.set("order", "relevance");
+        youtubeURL.searchParams.set("key", apiKey);
 
-    youtubeURL.searchParams.set("part", "snippet");
-    youtubeURL.searchParams.set("q", topic);
-    youtubeURL.searchParams.set("type", "video");
-    youtubeURL.searchParams.set("videoDuration", "short");
-    youtubeURL.searchParams.set("videoEmbeddable", "true");
-    youtubeURL.searchParams.set("maxResults", "8");
-    youtubeURL.searchParams.set("order", "relevance");
-    youtubeURL.searchParams.set("key", apiKey);
+        const response = await fetch(youtubeURL.toString());
+        const rawText = await response.text();
 
-    console.log("Searching YouTube for:", topic);
+        if (!response.ok) {
+          console.error(
+            "YouTube error for",
+            topic,
+            response.status,
+            rawText
+          );
 
-    const response = await fetch(youtubeURL.toString());
+          return [];
+        }
 
-    const rawText = await response.text();
+        const data = JSON.parse(rawText);
 
-    if (!response.ok) {
-      console.error(
-        "YouTube API ERROR:",
-        response.status,
-        rawText
-      );
+        return (data.items || [])
+          .filter(item =>
+            item &&
+            item.id &&
+            item.id.videoId
+          )
+          .map(item => {
+            const videoId = item.id.videoId;
 
-      return res.status(502).json({
-        ok: false,
-        error: "YouTube search failed",
-        youtubeStatus: response.status,
-        youtubeResponse: rawText,
-        reels: []
-      });
-    }
+            return {
+              id: videoId,
 
-    let data;
+              title:
+                item.snippet?.title ||
+                "Laper Reel",
 
-    try {
-      data = JSON.parse(rawText);
-    } catch (e) {
-      console.error("YouTube returned invalid JSON:", rawText);
+              channel:
+                item.snippet?.channelTitle ||
+                "Creator",
 
-      return res.status(502).json({
-        ok: false,
-        error: "Invalid YouTube response",
-        reels: []
-      });
-    }
+              description:
+                item.snippet?.description ||
+                "",
 
-    const reels = (data.items || [])
-      .filter(item =>
-        item &&
-        item.id &&
-        item.id.videoId
-      )
-      .map(item => {
-        const videoId = item.id.videoId;
+              thumbnail:
+                item.snippet?.thumbnails?.high?.url ||
+                item.snippet?.thumbnails?.medium?.url ||
+                item.snippet?.thumbnails?.default?.url ||
+                "",
 
-        return {
-          id: videoId,
+              embedUrl:
+                "https://www.youtube.com/embed/" +
+                encodeURIComponent(videoId) +
+                "?playsinline=1&rel=0",
 
-          title:
-            item.snippet?.title ||
-            "Laper Reel",
+              source: "youtube",
 
-          channel:
-            item.snippet?.channelTitle ||
-            "YouTube creator",
+              topic: topic
+            };
+          });
 
-          description:
-            item.snippet?.description ||
-            "",
+      } catch (error) {
+        console.error(
+          "Search failed for topic:",
+          topic,
+          error
+        );
 
-          thumbnail:
-            item.snippet?.thumbnails?.high?.url ||
-            item.snippet?.thumbnails?.medium?.url ||
-            item.snippet?.thumbnails?.default?.url ||
-            "",
+        return [];
+      }
+    });
 
-          embedUrl:
-            "https://www.youtube.com/embed/" +
-            encodeURIComponent(videoId) +
-            "?autoplay=1&playsinline=1&rel=0",
+    /*
+      Wait for all category searches.
+    */
+    const results = await Promise.all(searches);
 
-          source: "youtube",
+    /*
+      Flatten everything into one list.
+    */
+    let reels = results.flat();
 
-          topic: topic
-        };
-      });
+    /*
+      Remove duplicate videos.
+    */
+    const seen = new Set();
+
+    reels = reels.filter(reel => {
+      if (seen.has(reel.id)) {
+        return false;
+      }
+
+      seen.add(reel.id);
+      return true;
+    });
+
+    /*
+      Mix all categories together.
+    */
+    reels = shuffleLaperReels(reels);
 
     console.log(
-      "YouTube returned",
+      "Laper mixed Reels:",
       reels.length,
-      "Reels for",
-      topic
+      "videos from",
+      topics.length,
+      "topics"
     );
 
     return res.json({
       ok: true,
-      topic: topic,
+      topics: topics,
       count: reels.length,
       reels: reels
     });
 
   } catch (error) {
-    console.error("Laper Reels server error:", error);
+    console.error("Laper mixed Reels error:", error);
 
     return res.status(500).json({
       ok: false,
@@ -1178,8 +1207,7 @@ app.get("/laper/reels/topics", (req, res) => {
   });
 });
 
-
-console.log("Laper Live Reels system loaded");
+console.log("Laper mixed multi-topic Reels loaded");
 /*
 =========================================================
 SERVER START
