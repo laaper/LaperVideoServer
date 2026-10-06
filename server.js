@@ -1005,9 +1005,9 @@ app.post(
 
   }
 );
-// ==========================================
-// LAPER MIXED LIVE REELS
-// ==========================================
+// ============================================================
+// LAPER REELS + FIRESTORE RECOMMENDATION TREE
+// ============================================================
 
 const LAPER_REEL_TOPICS = [
   "gaming",
@@ -1032,182 +1032,548 @@ const LAPER_REEL_TOPICS = [
   "funny"
 ];
 
-function shuffleLaperReels(array) {
+function shuffleLaper(array) {
   const result = [...array];
 
   for (let i = result.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
-    [result[i], result[j]] = [result[j], result[i]];
+
+    [result[i], result[j]] =
+      [result[j], result[i]];
   }
 
   return result;
 }
 
+
+// ============================================================
+// GET PERSONALIZED REELS
+// ============================================================
+
 app.get("/laper/reels", async (req, res) => {
+
   try {
-    const apiKey = process.env.YOUTUBE_API_KEY;
+
+    const apiKey =
+      process.env.YOUTUBE_API_KEY;
 
     if (!apiKey) {
+
       return res.status(500).json({
         ok: false,
         error: "YOUTUBE_API_KEY is not configured",
         reels: []
       });
+
     }
 
     /*
-      Search several different categories in ONE request.
-      This prevents the feed from being only one topic.
+      The frontend sends the user's Firebase UID.
+
+      We only use it to ask Firestore for the user's
+      recommendation data.
     */
-    const topics = shuffleLaperReels(LAPER_REEL_TOPICS).slice(0, 6);
 
-    const searches = topics.map(async (topic) => {
+    const userId =
+      String(req.query.userId || "");
+
+    let topicScores = {};
+
+    /*
+      Firestore is optional here.
+
+      If your server already has Firebase Admin initialized,
+      this will use it.
+
+      If it isn't available, the feed still works normally.
+    */
+
+    if (
+      userId &&
+      typeof db !== "undefined" &&
+      db &&
+      typeof db.collection === "function"
+    ) {
+
       try {
-        const youtubeURL = new URL(
-          "https://www.googleapis.com/youtube/v3/search"
-        );
 
-        youtubeURL.searchParams.set("part", "snippet");
-        youtubeURL.searchParams.set("q", topic);
-        youtubeURL.searchParams.set("type", "video");
-        youtubeURL.searchParams.set("videoDuration", "short");
-        youtubeURL.searchParams.set("videoEmbeddable", "true");
-        youtubeURL.searchParams.set("maxResults", "3");
-        youtubeURL.searchParams.set("order", "relevance");
-        youtubeURL.searchParams.set("key", apiKey);
+        const treeDoc =
+          await db
+            .collection("recommendationTrees")
+            .doc(userId)
+            .get();
 
-        const response = await fetch(youtubeURL.toString());
-        const rawText = await response.text();
+        if (treeDoc.exists) {
 
-        if (!response.ok) {
-          console.error(
-            "YouTube error for",
-            topic,
-            response.status,
-            rawText
-          );
+          const tree =
+            treeDoc.data() || {};
 
-          return [];
+          topicScores =
+            tree.topics || {};
+
         }
 
-        const data = JSON.parse(rawText);
+      } catch (firestoreError) {
 
-        return (data.items || [])
-          .filter(item =>
+        console.warn(
+          "Laper recommendation tree read failed:",
+          firestoreError.message
+        );
+
+      }
+
+    }
+
+
+    // ========================================================
+    // PICK 3 PERSONALIZED + 3 DISCOVERY TOPICS
+    // ========================================================
+
+    const ranked =
+      LAPER_REEL_TOPICS
+        .map(topic => ({
+          topic,
+          score:
+            Number(
+              topicScores[topic]
+            ) || 1
+        }))
+        .sort(
+          (a, b) =>
+            b.score - a.score
+        );
+
+    const personalized =
+      ranked
+        .slice(0, 3)
+        .map(item => item.topic);
+
+    const discovery =
+      shuffleLaper(
+        LAPER_REEL_TOPICS.filter(
+          topic =>
+            !personalized.includes(topic)
+        )
+      ).slice(0, 3);
+
+    const topics =
+      shuffleLaper([
+        ...personalized,
+        ...discovery
+      ]);
+
+
+    // ========================================================
+    // ONE YOUTUBE SEARCH
+    // ========================================================
+
+    const youtubeURL =
+      new URL(
+        "https://www.googleapis.com/youtube/v3/search"
+      );
+
+    youtubeURL.searchParams.set(
+      "part",
+      "snippet"
+    );
+
+    /*
+      "|" means OR in YouTube search.
+    */
+    youtubeURL.searchParams.set(
+      "q",
+      topics.join("|")
+    );
+
+    youtubeURL.searchParams.set(
+      "type",
+      "video"
+    );
+
+    youtubeURL.searchParams.set(
+      "videoDuration",
+      "short"
+    );
+
+    youtubeURL.searchParams.set(
+      "videoEmbeddable",
+      "true"
+    );
+
+    youtubeURL.searchParams.set(
+      "maxResults",
+      "25"
+    );
+
+    youtubeURL.searchParams.set(
+      "order",
+      "relevance"
+    );
+
+    youtubeURL.searchParams.set(
+      "key",
+      apiKey
+    );
+
+
+    const response =
+      await fetch(
+        youtubeURL.toString()
+      );
+
+    const rawText =
+      await response.text();
+
+
+    if (!response.ok) {
+
+      console.error(
+        "YouTube API error:",
+        response.status,
+        rawText
+      );
+
+      return res.status(
+        response.status
+      ).json({
+
+        ok: false,
+
+        error:
+          "YouTube search failed",
+
+        youtubeStatus:
+          response.status,
+
+        youtubeResponse:
+          rawText,
+
+        reels: []
+
+      });
+
+    }
+
+
+    const data =
+      JSON.parse(rawText);
+
+
+    // ========================================================
+    // BUILD REELS
+    // ========================================================
+
+    let reels =
+      (data.items || [])
+        .filter(
+          item =>
             item &&
             item.id &&
             item.id.videoId
-          )
-          .map(item => {
-            const videoId = item.id.videoId;
+        )
+        .map(item => {
 
-            return {
-              id: videoId,
+          const videoId =
+            item.id.videoId;
 
-              title:
-                item.snippet?.title ||
-                "Laper Reel",
+          const topic =
+            topics[
+              Math.floor(
+                Math.random() *
+                topics.length
+              )
+            ];
 
-              channel:
-                item.snippet?.channelTitle ||
-                "Creator",
+          return {
 
-              description:
-                item.snippet?.description ||
-                "",
+            id:
+              videoId,
 
-              thumbnail:
-                item.snippet?.thumbnails?.high?.url ||
-                item.snippet?.thumbnails?.medium?.url ||
-                item.snippet?.thumbnails?.default?.url ||
-                "",
+            title:
+              item.snippet?.title ||
+              "Laper Reel",
 
-              embedUrl:
-                "https://www.youtube.com/embed/" +
-                encodeURIComponent(videoId) +
-                "?playsinline=1&rel=0",
+            channel:
+              item.snippet?.channelTitle ||
+              "Creator",
 
-              source: "youtube",
+            description:
+              item.snippet?.description ||
+              "",
 
-              topic: topic
-            };
-          });
+            thumbnail:
+              item.snippet?.thumbnails?.high?.url ||
+              item.snippet?.thumbnails?.medium?.url ||
+              item.snippet?.thumbnails?.default?.url ||
+              "",
 
-      } catch (error) {
-        console.error(
-          "Search failed for topic:",
-          topic,
-          error
-        );
+            embedUrl:
+              "https://www.youtube.com/embed/" +
+              encodeURIComponent(videoId) +
+              "?playsinline=1" +
+              "&enablejsapi=1" +
+              "&rel=0" +
+              "&modestbranding=1",
 
-        return [];
-      }
-    });
+            source:
+              "youtube",
 
-    /*
-      Wait for all category searches.
-    */
-    const results = await Promise.all(searches);
+            topic
 
-    /*
-      Flatten everything into one list.
-    */
-    let reels = results.flat();
+          };
 
-    /*
-      Remove duplicate videos.
-    */
-    const seen = new Set();
+        });
 
-    reels = reels.filter(reel => {
-      if (seen.has(reel.id)) {
-        return false;
-      }
 
-      seen.add(reel.id);
-      return true;
-    });
+    // ========================================================
+    // REMOVE DUPLICATES
+    // ========================================================
 
-    /*
-      Mix all categories together.
-    */
-    reels = shuffleLaperReels(reels);
+    const seen =
+      new Set();
 
-    console.log(
-      "Laper mixed Reels:",
-      reels.length,
-      "videos from",
-      topics.length,
-      "topics"
-    );
+    reels =
+      reels.filter(reel => {
+
+        if (
+          seen.has(reel.id)
+        ) {
+          return false;
+        }
+
+        seen.add(reel.id);
+
+        return true;
+
+      });
+
+
+    reels =
+      shuffleLaper(reels);
+
 
     return res.json({
+
       ok: true,
-      topics: topics,
-      count: reels.length,
-      reels: reels
+
+      topics,
+
+      count:
+        reels.length,
+
+      reels
+
     });
+
 
   } catch (error) {
-    console.error("Laper mixed Reels error:", error);
+
+    console.error(
+      "Laper Reels error:",
+      error
+    );
 
     return res.status(500).json({
+
       ok: false,
-      error: error.message || "Internal server error",
+
+      error:
+        error.message ||
+        "Internal server error",
+
       reels: []
+
     });
+
   }
+
 });
 
 
-app.get("/laper/reels/topics", (req, res) => {
-  res.json({
-    ok: true,
-    topics: LAPER_REEL_TOPICS
-  });
-});
+// ============================================================
+// RECOMMENDATION EVENT
+// ============================================================
 
-console.log("Laper mixed multi-topic Reels loaded");
+app.post(
+  "/laper/recommendation-event",
+  express.json(),
+  async (req, res) => {
+
+    try {
+
+      const {
+        userId,
+        topic,
+        action,
+        videoId
+      } = req.body || {};
+
+
+      if (!userId || !topic) {
+
+        return res.status(400).json({
+          ok: false,
+          error:
+            "userId and topic are required"
+        });
+
+      }
+
+
+      if (
+        typeof db === "undefined" ||
+        !db ||
+        typeof db.collection !== "function"
+      ) {
+
+        return res.status(500).json({
+          ok: false,
+          error:
+            "Firestore is not available on the server"
+        });
+
+      }
+
+
+      const ref =
+        db
+          .collection(
+            "recommendationTrees"
+          )
+          .doc(String(userId));
+
+
+      const snap =
+        await ref.get();
+
+
+      let tree =
+        snap.exists
+          ? snap.data()
+          : {
+              version: 1,
+              topics: {},
+              recent: []
+            };
+
+
+      if (!tree.topics) {
+        tree.topics = {};
+      }
+
+      if (!Array.isArray(tree.recent)) {
+        tree.recent = [];
+      }
+
+
+      if (
+        typeof tree.topics[topic] !==
+        "number"
+      ) {
+
+        tree.topics[topic] = 1;
+
+      }
+
+
+      // ======================================================
+      // LEARNING WEIGHTS
+      // ======================================================
+
+      if (action === "watch") {
+
+        tree.topics[topic] += 1;
+
+      }
+
+      else if (action === "like") {
+
+        tree.topics[topic] += 3;
+
+      }
+
+      else if (action === "replay") {
+
+        tree.topics[topic] += 2;
+
+      }
+
+      else if (action === "skip") {
+
+        tree.topics[topic] -= 0.4;
+
+      }
+
+
+      tree.topics[topic] =
+        Math.max(
+          0.1,
+          Math.min(
+            25,
+            tree.topics[topic]
+          )
+        );
+
+
+      // ======================================================
+      // REMEMBER RECENT VIDEOS
+      // ======================================================
+
+      if (videoId) {
+
+        tree.recent = [
+          String(videoId),
+          ...tree.recent.filter(
+            id =>
+              id !== String(videoId)
+          )
+        ].slice(0, 50);
+
+      }
+
+
+      tree.updatedAt =
+        new Date();
+
+
+      // ======================================================
+      // SAVE
+      // ======================================================
+
+      await ref.set(
+        tree,
+        {
+          merge: true
+        }
+      );
+
+
+      return res.json({
+        ok: true
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "Laper recommendation error:",
+        error
+      );
+
+      return res.status(500).json({
+
+        ok: false,
+
+        error:
+          error.message ||
+          "Recommendation update failed"
+
+      });
+
+    }
+
+  }
+);
 /*
 =========================================================
 SERVER START
